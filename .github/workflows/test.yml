@@ -1,0 +1,66 @@
+name: Grader
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v3
+
+      - uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - run: |
+          pip install -U pip pytest
+          pytest -q tests/*
+
+  unlock_next_level:
+    needs: test
+    if: ${{ needs.test.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+        with:
+          repository: grainme/001
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine current & next levels
+        id: levels
+        run: |
+          CURRENT=$(ls tests | grep level_ | sort | tail -1)
+          NUM=${CURRENT##*_}
+          NEXT_NUM=$((10#$NUM + 1))
+          NEXT=$(printf "%02d" $NEXT_NUM)
+          echo "current=$CURRENT" >> $GITHUB_OUTPUT
+          echo "next_branch=level-${NEXT}" >> $GITHUB_OUTPUT
+          echo "next_dir=tests/level_${NEXT}" >> $GITHUB_OUTPUT
+
+      - name: Check if next level exists
+        id: check
+        run: |
+          if git ls-remote --exit-code origin "refs/heads/${{ steps.levels.outputs.next_branch }}"; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Unlock next level via PR
+        if: steps.check.outputs.exists == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "Unlock level ${{ steps.levels.outputs.next_branch }}"
+          title: "🏆 Congratulations! Here's Level ${{ steps.levels.outputs.next_branch }}"
+          body: |
+            Well done! All tests passed for `${{ steps.levels.outputs.current }}`.
+            Merge this PR to unlock `${{ steps.levels.outputs.next_dir }}`.
+          branch: unlock/${{ steps.levels.outputs.next_branch }}
+          delete-branch: true
+          base: ${{ github.event.repository.default_branch }}
+          source: grainme/001:${{ steps.levels.outputs.next_branch }}
