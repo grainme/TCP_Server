@@ -5,6 +5,10 @@ on:
   pull_request:
     branches: [ main, master ]
 
+env:
+  TEMPLATE_OWNER: "chibuka"
+  TEMPLATE_REPO: "TCP_Server"
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -51,12 +55,17 @@ jobs:
     if: ${{ needs.test.outputs.passed == 'true' && github.event_name == 'push' }}
     runs-on: ubuntu-latest
     steps:
+      # First checkout the user's current repo
       - uses: actions/checkout@v4
         with:
-          # Use the original template repo, not hardcoded
-          repository: ${{ vars.TEMPLATE_REPO || 'chibuka/TCP_Server' }}
-          token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
+      
+      # Add template repo as remote and fetch next level
+      - name: Setup template remote
+        run: |
+          git remote add template https://github.com/${{ env.TEMPLATE_OWNER }}/${{ env.TEMPLATE_REPO }}.git
+          git fetch template
       
       - name: Determine current & next levels
         id: levels
@@ -73,7 +82,7 @@ jobs:
       - name: Check if next level exists in template
         id: check
         run: |
-          if git ls-remote --exit-code origin "refs/heads/${{ steps.levels.outputs.next_branch }}"; then
+          if git ls-remote --exit-code template "refs/heads/${{ steps.levels.outputs.next_branch }}"; then
             echo "exists=true" >> $GITHUB_OUTPUT
             echo "Next level branch exists: ${{ steps.levels.outputs.next_branch }}"
           else
@@ -84,22 +93,17 @@ jobs:
       - name: Checkout user's fork and create PR
         if: steps.check.outputs.exists == 'true'
         run: |
-          # Switch to user's fork
-          cd $GITHUB_WORKSPACE
-          git remote add user-fork https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
-          git fetch user-fork
-          
           # Fetch the next level from template
-          git fetch origin ${{ steps.levels.outputs.next_branch }}
+          git fetch template ${{ steps.levels.outputs.next_branch }}
           
           # Create new branch in user's fork
           git checkout -b unlock/${{ steps.levels.outputs.next_branch }}
           
           # Merge the next level
-          git merge origin/${{ steps.levels.outputs.next_branch }} --no-edit
+          git merge template/${{ steps.levels.outputs.next_branch }} --no-edit
           
-          # Push to user's fork
-          git push user-fork unlock/${{ steps.levels.outputs.next_branch }}
+          # Push to user's fork (origin)
+          git push origin unlock/${{ steps.levels.outputs.next_branch }}
       
       - name: Create Pull Request in user's fork
         if: steps.check.outputs.exists == 'true'
@@ -141,7 +145,10 @@ jobs:
             NEXT_UNLOCKED="true"
           fi
           
-          curl -X POST "${{ vars.WEBHOOK_URL || 'https://your-api.com/api/submission_webhook' }}" \
+          # Get challenge type from repo name (assuming format like TCP_Server, HTTP_Parser, etc.)
+          CHALLENGE_TYPE="$REPO_NAME"
+          
+          curl -X POST "${{ vars.WEBHOOK_URL || 'http://localhost:8000/api/submission_webhook' }}" \
             -H "Authorization: Bearer ${{ secrets.WEBHOOK_TOKEN }}" \
             -H "Content-Type: application/json" \
             -H "X-GitHub-Event: ${{ github.event_name }}" \
@@ -150,6 +157,7 @@ jobs:
               "repo_owner": "'$REPO_OWNER'",
               "repo_name": "'$REPO_NAME'", 
               "repo": "${{ github.repository }}",
+              "challenge_type": "'$CHALLENGE_TYPE'",
               "level": "${{ needs.test.outputs.level }}",
               "status": "${{ needs.test.result }}",
               "tests_passed": "${{ needs.test.outputs.passed }}",
