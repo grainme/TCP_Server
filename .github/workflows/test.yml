@@ -1,66 +1,162 @@
 name: Grader
-
 on:
   push:
+    branches: [ main, master ]
   pull_request:
+    branches: [ main, master ]
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    outputs:
+      level: ${{ steps.levels.outputs.current }}
+      passed: ${{ steps.test_result.outputs.passed }}
     env:
       PYTHONUNBUFFERED: "1"
     steps:
-      - uses: actions/checkout@v3
-
-      - uses: actions/setup-python@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
-
-      - run: |
+          python-version: '3.11'
+      
+      - name: Determine current level
+        id: levels
+        run: |
+          if [ -d "tests" ]; then
+            CURRENT=$(ls tests | grep -E '^level_[0-9]+$' | sort -V | tail -1)
+            if [ -z "$CURRENT" ]; then
+              CURRENT="level_01"
+            fi
+          else
+            CURRENT="level_01"
+          fi
+          echo "current=$CURRENT" >> $GITHUB_OUTPUT
+          echo "Current level: $CURRENT"
+      
+      - name: Install dependencies and run tests
+        id: test_result
+        run: |
           pip install -U pip pytest
-          pytest -q tests/*
+          if pytest -q tests/${{ steps.levels.outputs.current }} --tb=short; then
+            echo "passed=true" >> $GITHUB_OUTPUT
+            echo "✅ Tests passed!"
+          else
+            echo "passed=false" >> $GITHUB_OUTPUT
+            echo "❌ Tests failed!"
+            exit 1
+          fi
 
   unlock_next_level:
     needs: test
-    if: ${{ needs.test.result == 'success' }}
+    if: ${{ needs.test.outputs.passed == 'true' && github.event_name == 'push' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
         with:
-          repository: grainme/001
-          token: ${{ secrets.GITHUB_TOKEN }}
-
+          # Use the original template repo, not hardcoded
+          repository: ${{ vars.TEMPLATE_REPO || 'chibuka/TCP_Server' }}
+          token: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+          fetch-depth: 0
+      
       - name: Determine current & next levels
         id: levels
         run: |
-          CURRENT=$(ls tests | grep level_ | sort | tail -1)
+          CURRENT="${{ needs.test.outputs.level }}"
           NUM=${CURRENT##*_}
           NEXT_NUM=$((10#$NUM + 1))
           NEXT=$(printf "%02d" $NEXT_NUM)
           echo "current=$CURRENT" >> $GITHUB_OUTPUT
           echo "next_branch=level-${NEXT}" >> $GITHUB_OUTPUT
           echo "next_dir=tests/level_${NEXT}" >> $GITHUB_OUTPUT
-
-      - name: Check if next level exists
+          echo "next_level=level_${NEXT}" >> $GITHUB_OUTPUT
+      
+      - name: Check if next level exists in template
         id: check
         run: |
           if git ls-remote --exit-code origin "refs/heads/${{ steps.levels.outputs.next_branch }}"; then
             echo "exists=true" >> $GITHUB_OUTPUT
+            echo "Next level branch exists: ${{ steps.levels.outputs.next_branch }}"
           else
             echo "exists=false" >> $GITHUB_OUTPUT
+            echo "No more levels available"
           fi
-
-      - name: Unlock next level via PR
+      
+      - name: Checkout user's fork and create PR
+        if: steps.check.outputs.exists == 'true'
+        run: |
+          # Switch to user's fork
+          cd $GITHUB_WORKSPACE
+          git remote add user-fork https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
+          git fetch user-fork
+          
+          # Fetch the next level from template
+          git fetch origin ${{ steps.levels.outputs.next_branch }}
+          
+          # Create new branch in user's fork
+          git checkout -b unlock/${{ steps.levels.outputs.next_branch }}
+          
+          # Merge the next level
+          git merge origin/${{ steps.levels.outputs.next_branch }} --no-edit
+          
+          # Push to user's fork
+          git push user-fork unlock/${{ steps.levels.outputs.next_branch }}
+      
+      - name: Create Pull Request in user's fork
         if: steps.check.outputs.exists == 'true'
         uses: peter-evans/create-pull-request@v6
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "Unlock level ${{ steps.levels.outputs.next_branch }}"
-          title: "🏆 Congratulations! Here's Level ${{ steps.levels.outputs.next_branch }}"
+          commit-message: "🚀 Unlock ${{ steps.levels.outputs.next_level }}"
+          title: "🏆 Level Up! Unlock ${{ steps.levels.outputs.next_level }}"
           body: |
-            Well done! All tests passed for `${{ steps.levels.outputs.current }}`.
-            Merge this PR to unlock `${{ steps.levels.outputs.next_dir }}`.
+            ## 🎉 Congratulations!
+            
+            You've successfully completed **${{ steps.levels.outputs.current }}**!
+            
+            ### What's next?
+            - Merge this PR to unlock `${{ steps.levels.outputs.next_dir }}`
+            - New challenges and tests are waiting for you
+            - Keep coding and level up! 🚀
+            
+            ---
+            *Good luck with the next challenge!* 💪
           branch: unlock/${{ steps.levels.outputs.next_branch }}
           delete-branch: true
           base: ${{ github.event.repository.default_branch }}
-          source: grainme/001:${{ steps.levels.outputs.next_branch }}
+
+  notify:
+    needs: [test, unlock_next_level]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Notify platform
+        run: |
+          # Extract repo owner and name
+          REPO_OWNER=$(echo "${{ github.repository }}" | cut -d'/' -f1)
+          REPO_NAME=$(echo "${{ github.repository }}" | cut -d'/' -f2)
+          
+          # Determine if next level was unlocked
+          NEXT_UNLOCKED="false"
+          if [[ "${{ needs.unlock_next_level.result }}" == "success" ]]; then
+            NEXT_UNLOCKED="true"
+          fi
+          
+          curl -X POST "${{ vars.WEBHOOK_URL || 'https://your-api.com/api/submission_webhook' }}" \
+            -H "Authorization: Bearer ${{ secrets.WEBHOOK_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -H "X-GitHub-Event: ${{ github.event_name }}" \
+            -d '{
+              "user": "${{ github.actor }}",
+              "repo_owner": "'$REPO_OWNER'",
+              "repo_name": "'$REPO_NAME'", 
+              "repo": "${{ github.repository }}",
+              "level": "${{ needs.test.outputs.level }}",
+              "status": "${{ needs.test.result }}",
+              "tests_passed": "${{ needs.test.outputs.passed }}",
+              "commit": "${{ github.sha }}",
+              "commit_message": "${{ github.event.head_commit.message }}",
+              "branch": "${{ github.ref_name }}",
+              "event_type": "${{ github.event_name }}",
+              "next_level_unlocked": "'$NEXT_UNLOCKED'",
+              "timestamp": "'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"
+            }' || echo "Webhook notification failed, continuing..."
